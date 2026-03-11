@@ -7,3 +7,5 @@ This repository stores all the lab notes for implementing the methods covered in
 "dp-I.ipynb" covers the feed-forward neural networks (FFNN) with reference to https://www.statlearning.com/.
 
 "dp-II.ipynb" covers the long short-term memory (LSTM) with reference to https://www.statlearning.com/.
+
+"build_timeseries.py" is used to generate the datasets used in our group project.
