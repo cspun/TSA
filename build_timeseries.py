@@ -7,11 +7,11 @@ Build an Excel workbook with 5 daily time series (two columns each):
   - Earthquake counts per day (USGS)
   - Sunspot number per day (SIDC/SILSO daily file)
 
-Output: timeseries_dataset.xlsx (in the same folder)
+Output: GroupProjectData.xlsx (in the same folder)
 
 Usage:
-  python build_timeseries.py --start 2024-01-01 --end 2025-04-19
-  # If --start/--end omitted, defaults to last 365 days up to today.
+  python build_timeseries.py --start 2021-01-01 --end 2026-04-19
+  # If --start/--end omitted, defaults to last 1826 days (5 years) up to today.
 """
 
 import argparse
@@ -190,41 +190,102 @@ def fetch_eq_counts(start: dt.date, end: dt.date, chunk_days: int = 14, pause_s:
         return pd.DataFrame(columns=["date", "eq_count"])
 
 # -----------------------
-# 4) Sunspot number (SIDC/SILSO daily file)
+# 4) Sunspot number (SIDC/SILSO daily file + current month extension)
 # -----------------------
 
 SILSO_DAILY_URL = "https://www.sidc.be/silso/DATA/SN_d_tot_V2.0.txt"
+SILSO_CURRENT_URL = "https://www.sidc.be/SILSO/DATA/EISN/EISN_current.txt"
 
-def fetch_sunspot_daily(start: dt.date, end: dt.date) -> pd.DataFrame:
-    """
-    Download SILSO daily sunspot file and parse column 5 (0-based col 4) as the daily number.
-    Missing values marked -1 -> NaN.
-    """
-    r = requests.get(SILSO_DAILY_URL, timeout=45, headers={"User-Agent":"ntu-timeseries-student/1.0"})
-    r.raise_for_status()
-    raw = r.text
 
-    # Parse: space-delimited with comment lines starting '#'
+def _parse_silso_daily_text(raw: str, value_col: int = 4, source_name: str = "") -> pd.DataFrame:
+    """
+    Parse SILSO daily-style text file.
+
+    Expected columns:
+    Year Month Day DecDate DailySunspot StdDev Nobs Definitive(1/0)
+
+    Returns
+    -------
+    pd.DataFrame with columns: date, sunspot, source
+    """
     rows = []
     for line in raw.splitlines():
+        line = line.strip()
         if not line or line.startswith("#"):
             continue
+
         parts = line.split()
-        # Format: Year Month Day DecDate Daily Sunspot StdDev Nobs Definitive(1/0)
-        # Example: 2024  12  31  2024.9986  55.2  7.3  52  1
+        if len(parts) <= value_col:
+            continue
+
         try:
             y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
-            val = float(parts[4])
+            val = float(parts[value_col])
             if val < 0:
-                val = None
-            rows.append({"date": pd.Timestamp(y, m, d), "sunspot": val})
+                val = np.nan
+            rows.append({
+                "date": pd.Timestamp(y, m, d),
+                "sunspot": val,
+                "source": source_name
+            })
         except Exception:
             continue
 
-    df = pd.DataFrame(rows)
+    if not rows:
+        return pd.DataFrame(columns=["date", "sunspot", "source"])
+
+    return pd.DataFrame(rows)
+
+
+def fetch_sunspot_daily(start: dt.date, end: dt.date) -> pd.DataFrame:
+    """
+    Download SILSO historical daily file plus current-month update file.
+
+    Priority rule
+    -------------
+    Historical data dominate current data on overlapping dates.
+
+    Returns
+    -------
+    pd.DataFrame with columns: date, sunspot
+    """
+    headers = {"User-Agent": "ntu-timeseries-student/1.0"}
+
+    # Historical daily file
+    r_hist = requests.get(SILSO_DAILY_URL, timeout=45, headers=headers)
+    r_hist.raise_for_status()
+    df_hist = _parse_silso_daily_text(
+        r_hist.text,
+        value_col=4,
+        source_name="historical"
+    )
+
+    # Current daily file
+    r_cur = requests.get(SILSO_CURRENT_URL, timeout=45, headers=headers)
+    r_cur.raise_for_status()
+    df_cur = _parse_silso_daily_text(
+        r_cur.text,
+        value_col=4,
+        source_name="current"
+    )
+
+    # Combine with historical taking priority on overlap:
+    # put current first, historical second, then keep='last'
+    df = pd.concat([df_cur, df_hist], ignore_index=True)
+
     if df.empty:
         return pd.DataFrame(columns=["date", "sunspot"])
-    df = df[(df["date"] >= pd.Timestamp(start)) & (df["date"] <= pd.Timestamp(end))]
+
+    df = (
+        df.sort_values("date")
+          .drop_duplicates(subset="date", keep="last")
+          .sort_values("date")
+          .reset_index(drop=True)
+    )
+
+    mask = (df["date"] >= pd.Timestamp(start)) & (df["date"] <= pd.Timestamp(end))
+    df = df.loc[mask, ["date", "sunspot"]].reset_index(drop=True)
+
     return df
 
 # -----------------------
@@ -235,12 +296,12 @@ def main():
     parser = argparse.ArgumentParser(description="Build 5-sheet Excel with daily time series.")
     parser.add_argument("--start", type=str, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", type=str, help="End date (YYYY-MM-DD)")
-    parser.add_argument("--out", type=str, default="timeseries_dataset.xlsx", help="Output Excel filename")
+    parser.add_argument("--out", type=str, default="GroupProjectData.xlsx", help="Output Excel filename")
     args = parser.parse_args()
 
     today = dt.date.today()
     end = dt.date.fromisoformat(args.end) if args.end else today
-    start = dt.date.fromisoformat(args.start) if args.start else (end - dt.timedelta(days=365))
+    start = dt.date.fromisoformat(args.start) if args.start else (end - dt.timedelta(days=1826))
 
     print(f"[INFO] Building dataset from {start} to {end} ...")
 
